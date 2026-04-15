@@ -1,0 +1,17 @@
+# pycache
+cifar10/__pycache__/
+
+# VSCode
+cifar10/.vscode/
+
+# Data
+cifar10/data/
+
+# Figures
+cifar10/Figures/
+
+# Saved models
+cifar10/saved_models/
+
+# DS_Store
+.DS_Store
