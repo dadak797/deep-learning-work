@@ -2,6 +2,7 @@
 cifar10/__pycache__/
 
 # VSCode
+.vscode/
 cifar10/.vscode/
 
 # Data
