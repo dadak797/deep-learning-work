@@ -49,9 +49,9 @@ def parse_args():
   )
   parser.add_argument(
     "--device",
-    choices = ["cpu", "cuda"],
-    default = "cuda",
-    help = "Choose whether to run on CPU or CUDA.",
+    choices = ["cpu", "cuda", "mps"],
+    default = "mps",
+    help = "Choose whether to run on CPU, CUDA, or MPS.",
   )
   parser.add_argument(
     "--batch_size",
@@ -115,6 +115,9 @@ def get_device(device_name):
   if device_name == "cuda" and not torch.cuda.is_available():
     raise RuntimeError("CUDA was requested, but no CUDA device is available.")
 
+  if device_name == "mps" and not torch.backends.mps.is_available():
+    raise RuntimeError("MPS was requested, but no MPS device is available.")
+
   return torch.device(device_name)
 
 
@@ -127,7 +130,6 @@ def train_model(model, trainloader, epochs, device):
 
   model.train()
   for epoch in range(epochs):
-    model.train()
     running_loss = 0.0
     batches_since_log = 0
     samples_since_log = 0
@@ -141,8 +143,8 @@ def train_model(model, trainloader, epochs, device):
       outputs = model(inputs)
       loss = criterion(outputs, labels)
 
-      loss.backward()
-      optimizer.step()
+      loss.backward()  # autograd가 graient 계산
+      optimizer.step() # 계산된 gradient로 모델의 가중치를 업데이트
 
       running_loss += loss.item()
       batches_since_log += 1
@@ -170,29 +172,29 @@ def load_saved_model(model, device):
 
 
 def test_model(model, testloader, classes, batch_size, device, epoch_index = None):
-    correct = 0
-    total = 0
-    model.eval()
-    with torch.no_grad():
-        for data in testloader:
-            images, labels = data
-            images = images.to(device)
-            labels = labels.to(device)
-            # calculate outputs by running images through the network
-            outputs = model(images)
-            # the class with the highest energy is what we choose as prediction
-            _, predicted = torch.max(outputs, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
+  correct = 0
+  total = 0
+  model.eval()
+  with torch.no_grad():
+    for data in testloader:
+      images, labels = data
+      images = images.to(device)
+      labels = labels.to(device)
+      # calculate outputs by running images through the network
+      outputs = model(images)
+      # the class with the highest energy is what we choose as prediction
+      _, predicted = torch.max(outputs, 1)
+      total += labels.size(0)
+      correct += (predicted == labels).sum().item()
 
-    accuracy = 100 * correct / total
+  accuracy = 100 * correct / total
 
-    if epoch_index is not None:
-        print(f'Accuracy of the network on the {total} test images after epoch {epoch_index + 1}: {accuracy:.2f} %')
-    else:
-        print(f'Accuracy of the network on the {total} test images: {accuracy:.2f} %')
+  if epoch_index is not None:
+    print(f'Accuracy of the network on the {total} test images after epoch {epoch_index + 1}: {accuracy:.2f} %')
+  else:
+    print(f'Accuracy of the network on the {total} test images: {accuracy:.2f} %')
 
-    return accuracy
+  return accuracy
 
 
 def test_model_per_class(model, testloader, classes, device):
@@ -342,10 +344,10 @@ if __name__ == "__main__":
   classes = ('airplane', 'automobile', 'bird', 'cat',
              'deer', 'dog', 'frog', 'horse', 'ship', 'truck')
 
-  model = SimpleCNN().to(device)
+  # model = SimpleCNN().to(device)
   # model = SmallVGG9().to(device)
   # model = MediumVGG8().to(device)
-  # model = VGG16().to(device)
+  model = VGG16().to(device)
 
   if args.mode == "train":
     if args.restart:
