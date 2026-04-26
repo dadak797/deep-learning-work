@@ -72,7 +72,8 @@ def build_dataloaders(batch_size, use_data_aug = False):
   # ToTensor(): [0, 255] -> [0, 1]
   # Normalize(): (x - mean) / std -> [-1, 1]
   test_transform = transforms.Compose(
-    [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
+    # [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
+    [transforms.ToTensor(), transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))]
   )
 
   # Define training transformations with optional data augmentation
@@ -82,14 +83,16 @@ def build_dataloaders(batch_size, use_data_aug = False):
         transforms.RandomHorizontalFlip(),
         transforms.RandomCrop(32, padding = 4),
         transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        # transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
       ]
     )
   else:
     train_transform = transforms.Compose(
       [
         transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        # transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
       ]
     )
 
@@ -234,7 +237,9 @@ def train_model_and_test_model(model, trainloader, testloader, classes, batch_si
 
   criterion = nn.CrossEntropyLoss()
   optimizer = optim.SGD(model.parameters(), lr = 0.001, momentum = 0.9)
-
+  scheduler = optim.lr_scheduler.StepLR(optimizer, step_size = 20, gamma = 0.5)
+  min_lr = 1e-5
+  
   global_step = 0
 
   for epoch in range(epochs):
@@ -269,6 +274,11 @@ def train_model_and_test_model(model, trainloader, testloader, classes, batch_si
     # Test the model after each epoch
     accuracy = test_model(model, testloader, classes, batch_size, device, epoch_index = epoch)
     accuracy_history.append((epoch + 1, accuracy))
+    
+    scheduler.step()
+    for param_group in optimizer.param_groups:
+      if param_group['lr'] < min_lr:
+        param_group['lr'] = min_lr
 
   print('Finished Training')
 
