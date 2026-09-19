@@ -13,3 +13,8 @@ cifar10/Figures/
 cifar10/saved_models/
 cifar10/logs/
 cifar10/_results_backup/
+
+# transformer
+transformer/.venv/
+transformer/__pycache__/
+transformer/test.ipynb
