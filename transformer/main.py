@@ -19,7 +19,7 @@ def scaled_dot_product_attention(query, key, value, mask=None):
   # score: (batch_size, head_count, seq_length, seq_length)
   scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(key_dim)
   if mask is not None:
-    scores = scores.masked_fill(mask == 0, -1e9)
+    scores = scores.masked_fill(mask == 0, torch.finfo(scores.dtype).min)
   attn = torch.softmax(scores, dim=-1)
   return torch.matmul(attn, value), attn
 
@@ -48,8 +48,12 @@ class MultiHeadAttention(nn.Module):
   # query, key, value: (batch_size, seq_length, embedding_dim)
   def forward(self, query, key, value, mask=None):
     if mask is not None:
-      # Input Mask: (batch_size, seq_length, seq_length)
-      # Expand mask for multi-head attention: (batch_size, 1, seq_length, seq_length)
+      # Input Mask (1 = attend, 0 = masked):
+      #   - padding mask:    (batch_size, 1, key_length)
+      #   - look-ahead mask: (batch_size, query_length, key_length)
+      # Expand mask for multi-head attention (broadcast over heads):
+      #   -> (batch_size, 1, 1 or query_length, key_length)
+      assert mask.dim() == 3, "mask must be 3D: (batch_size, 1 or query_length, key_length)"
       mask = mask.unsqueeze(1)
 
     batch_size = query.size(0)
@@ -82,6 +86,18 @@ class MultiHeadAttention(nn.Module):
     
     return self.output_mat(x)
 
+class PositionwiseFeedForward(nn.Module):
+  def __init__(self, embedding_dim, ff_dim=2048):
+    super().__init__()
+    # W1: (embedding_dim, ff_dim), W2: (ff_dim, embedding_dim)
+    self.linear1 = nn.Linear(embedding_dim, ff_dim)
+    self.linear2 = nn.Linear(ff_dim, embedding_dim)
+
+  # x: (batch_size, seq_length, embedding_dim)
+  def forward(self, x):
+    x = torch.relu(self.linear1(x))  # (batch_size, seq_length, ff_dim)
+    return self.linear2(x)           # (batch_size, seq_length, embedding_dim)
+
 class EncoderLayer(nn.Module):
   def __init__(self, embedding_dim, self_attn, feed_forward, dropout=0.1, epsilon=1e-6):
     super().__init__()
@@ -109,15 +125,51 @@ class EncoderLayer(nn.Module):
     x = self.norm2(x)                            # LayerNorm2
     return x
 
+class PositionalEncoding(nn.Module):
+  def __init__(self, embedding_dim, dropout=0.1, max_length=5000):
+    super().__init__()
+    self.dropout = nn.Dropout(dropout)
+
+    # pe: (max_length, embedding_dim)
+    pe = torch.zeros(max_length, embedding_dim)
+    # position: (max_length, 1) → pos
+    position = torch.arange(0, max_length, dtype=torch.float).unsqueeze(1)
+    # two_i: (embedding_dim / 2,) → 2i = [0, 2, 4, ..., embedding_dim - 2]
+    two_i = torch.arange(0, embedding_dim, 2, dtype=torch.float)
+    # denominator: 10000^(2i / embedding_dim)
+    denominator = torch.pow(10000.0, two_i / embedding_dim)
+
+    # broadcast: (max_length, 1) / (embedding_dim / 2,) -> (max_length, embedding_dim / 2)
+    pe[:, 0::2] = torch.sin(position / denominator)  # PE(pos, 2i)   = sin(pos / 10000^(2i/d))
+    pe[:, 1::2] = torch.cos(position / denominator)  # PE(pos, 2i+1) = cos(pos / 10000^(2i/d))
+
+    # (1, max_length, embedding_dim): batch 차원으로 broadcast 되도록 함
+    # register_buffer: 학습 파라미터는 아니지만 state_dict에 저장되고 .to(device) 시 함께 이동함
+    self.register_buffer("pe", pe.unsqueeze(0))
+
+  # x: (batch_size, seq_length, embedding_dim)
+  def forward(self, x):
+    x = x + self.pe[:, :x.size(1)]
+    return self.dropout(x)
+
+class Embeddings(nn.Module):
+  def __init__(self, vocab_size, embedding_dim):
+    super().__init__()
+    self.embedding = nn.Embedding(vocab_size, embedding_dim)
+    self.embedding_dim = embedding_dim
+
+  # x: (batch_size, seq_length) 토큰 인덱스
+  def forward(self, x):
+    return self.embedding(x) * math.sqrt(self.embedding_dim)
+
+# src: (batch_size, src_length) → (batch_size, 1, src_length)
+def make_pad_mask(src, pad_idx):
+  return (src != pad_idx).unsqueeze(1)
+
 class Encoder(nn.Module):
   def __init__(self, layer, Nx):
     super().__init__()
     self.layers = nn.ModuleList([copy.deepcopy(layer) for _ in range(Nx)])
-
-    # Initialize parameters using Xavier uniform initialization
-    for parameter in self.parameters():
-      if parameter.dim() > 1:
-        nn.init.xavier_uniform_(parameter)
 
   def forward(self, x, mask):
     for layer in self.layers:
