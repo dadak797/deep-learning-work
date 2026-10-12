@@ -283,5 +283,42 @@ class Transformer(nn.Module):
     memory = self.encode(src, src_mask)
     return self.generator(self.decode(memory, src_mask, tgt, tgt_mask))
 
+# 기본값은 논문의 base 모델 (Table 3)
+# share_tgt_embed_generator: 타깃 임베딩 ↔ Generator 가중치 공유 (3.4절)
+# share_src_tgt_embed: 소스 ↔ 타깃 임베딩 가중치 공유 (소스/타깃이 같은 vocab을 쓸 때만 사용)
+def make_model(src_vocab_size, tgt_vocab_size, Nx=6, embedding_dim=512, ff_dim=2048, head_count=8, dropout=0.1,
+               share_tgt_embed_generator=True, share_src_tgt_embed=False):
+  c = copy.deepcopy
+  attn = MultiHeadAttention(head_count, embedding_dim)
+  ff = PositionwiseFeedForward(embedding_dim, ff_dim)
+
+  src_embed = Embeddings(src_vocab_size, embedding_dim)
+  tgt_embed = Embeddings(tgt_vocab_size, embedding_dim)
+  generator = Generator(embedding_dim, tgt_vocab_size)
+
+  # 같은 nn.Parameter 객체를 가리키게 하여 공유함 (크기는 모두 (vocab_size, embedding_dim))
+  if share_tgt_embed_generator:
+    generator.proj.weight = tgt_embed.embedding.weight
+  if share_src_tgt_embed:
+    assert src_vocab_size == tgt_vocab_size, "shared embeddings require the same vocab"
+    src_embed.embedding.weight = tgt_embed.embedding.weight
+
+  model = Transformer(
+    Encoder(EncoderLayer(embedding_dim, c(attn), c(ff), dropout), Nx),
+    Decoder(DecoderLayer(embedding_dim, c(attn), c(attn), c(ff), dropout), Nx),
+    nn.Sequential(src_embed, PositionalEncoding(embedding_dim, dropout)),
+    nn.Sequential(tgt_embed, PositionalEncoding(embedding_dim, dropout)),
+    generator,
+  )
+
+  # Initialize parameters using Xavier uniform initialization
+  # 공유된 가중치는 parameters()에 한 번만 나타나므로 한 번만 초기화됨
+  # bias, LayerNorm(1D)은 PyTorch 기본값(0, 1) 유지
+  for parameter in model.parameters():
+    if parameter.dim() > 1:
+      nn.init.xavier_uniform_(parameter)
+
+  return model
+
 if __name__ == "__main__":
   pass  
