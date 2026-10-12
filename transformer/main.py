@@ -243,5 +243,45 @@ class Decoder(nn.Module):
       x = layer(x, memory, src_mask, tgt_mask)
     return x
 
+# 디코더 출력을 다음 토큰에 대한 점수(logits)로 변환 (Figure 1의 Linear)
+# Softmax는 여기서 적용하지 않음:
+#   - 학습: nn.CrossEntropyLoss가 내부에서 log_softmax를 적용함
+#   - 추론: greedy decoding은 argmax만 필요하므로 softmax가 필요 없음
+class Generator(nn.Module):
+  def __init__(self, embedding_dim, vocab_size):
+    super().__init__()
+    self.proj = nn.Linear(embedding_dim, vocab_size)
+
+  # x: (batch_size, tgt_length, embedding_dim) -> (batch_size, tgt_length, vocab_size)
+  def forward(self, x):
+    return self.proj(x)
+
+class Transformer(nn.Module):
+  def __init__(self, encoder, decoder, src_embed, tgt_embed, generator):
+    super().__init__()
+    self.encoder = encoder
+    self.decoder = decoder
+    self.src_embed = src_embed  # Embeddings → PositionalEncoding
+    self.tgt_embed = tgt_embed  # Embeddings → PositionalEncoding
+    self.generator = generator
+
+  # src: (batch_size, src_length) 토큰 인덱스
+  # src_mask: (batch_size, 1, src_length)
+  # 반환 memory: (batch_size, src_length, embedding_dim)
+  def encode(self, src, src_mask):
+    return self.encoder(self.src_embed(src), src_mask)
+
+  # tgt: (batch_size, tgt_length) 토큰 인덱스 (shifted right: <bos>로 시작)
+  # tgt_mask: (batch_size, tgt_length, tgt_length)
+  # 반환: (batch_size, tgt_length, embedding_dim) Generator 적용 전 디코더 출력
+  def decode(self, memory, src_mask, tgt, tgt_mask):
+    return self.decoder(self.tgt_embed(tgt), memory, src_mask, tgt_mask)
+
+  # 학습용: 전체 타깃 시퀀스를 한 번에 처리 (teacher forcing)
+  # 반환 logits: (batch_size, tgt_length, tgt_vocab_size)
+  def forward(self, src, tgt, src_mask, tgt_mask):
+    memory = self.encode(src, src_mask)
+    return self.generator(self.decode(memory, src_mask, tgt, tgt_mask))
+
 if __name__ == "__main__":
   pass  
