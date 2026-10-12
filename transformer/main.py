@@ -329,13 +329,74 @@ stoi = {ch: i + 3 for i, ch in enumerate(CHARS)}   # 'a' → 3, ..., 'z' → 28,
 itos = {i: ch for ch, i in stoi.items()}
 VOCAB_SIZE = len(CHARS) + 3                          # 56
 MAX_LEN = 50                                         # 학습 문자열 최대 길이
+LETTERS = CHARS.replace(" ", "")                     # 공백을 제외한 문자 (단어 생성용)
 
-def make_batch(batch_size, min_len=1, max_len=MAX_LEN):
+# word_reverse 예제 데이터 생성 설정
+SHORT_WORD_LEN = 10      # 대부분의 단어는 1~10 글자
+LONG_WORD_PROB = 0.1     # 10% 확률로 11~MAX_LEN 글자의 긴 단어
+MULTI_SPACE_PROB = 0.2   # 단어 사이 공백: 80% 1개, 20% 2~3개
+EDGE_SPACE_PROB = 0.2    # 문장 앞/뒤 각각 20% 확률로 공백 1~3개
+MAX_EXTRA_SPACES = 3
+
+# reverse 예제 입력: 공백을 포함한 임의 문자열
+def random_text(min_len, max_len):
+  return "".join(random.choices(CHARS, k=random.randint(min_len, max_len)))
+
+def random_word_length(max_len):
+  if random.random() < LONG_WORD_PROB and max_len > SHORT_WORD_LEN:
+    return random.randint(SHORT_WORD_LEN + 1, max_len)
+  return random.randint(1, min(SHORT_WORD_LEN, max_len))
+
+def random_space_count(prob):
+  return random.randint(2, MAX_EXTRA_SPACES) if random.random() < prob else 1
+
+# word_reverse 예제 입력: 단어를 공백으로 이어 붙인 문장
+# random_text는 공백이 평균 53글자에 한 번꼴로만 나오므로 단어 구조를 따로 생성함
+#   - 단어 길이: 대부분 짧게, 가끔 긴 단어 (random_word_length)
+#   - 단어 사이: 가끔 연속 공백 / 문장 앞뒤: 가끔 공백
+def random_sentence(min_len, max_len):
+  length = random.randint(min_len, max_len)
+  lead = random.randint(1, MAX_EXTRA_SPACES) if random.random() < EDGE_SPACE_PROB else 0
+  trail = random.randint(1, MAX_EXTRA_SPACES) if random.random() < EDGE_SPACE_PROB else 0
+  body_len = length - lead - trail
+  if body_len < 1:  # 문장이 너무 짧으면 앞뒤 공백 없이 생성
+    lead, trail, body_len = 0, 0, length
+
+  body = ""
+  while len(body) < body_len:
+    if body:
+      body += " " * random_space_count(MULTI_SPACE_PROB)
+    body += "".join(random.choices(LETTERS, k=random_word_length(body_len)))
+  # 목표 길이로 자른 뒤 끝에 남은 공백 제거 (첫 단어는 최소 1글자이므로 빈 문자열이 되지 않음)
+  body = body[:body_len].rstrip(" ")
+  return " " * lead + body + " " * trail
+
+# "Hello World" -> "olleH dlroW": 공백 기준으로 각 단어만 뒤집고 단어 순서와 공백은 유지
+# split(" ")은 연속 공백이나 앞뒤 공백도 빈 문자열로 보존하므로 공백 위치가 그대로 유지됨
+def reverse_words(s):
+  return " ".join(word[::-1] for word in s.split(" "))
+
+# 예제별 입력 생성 함수, 정답 함수, 기본 모델 저장 경로
+TASKS = {
+  "reverse": {
+    "generate": random_text,
+    "target": lambda s: s[::-1],
+    "save_path": "./saved_models/reverse_model.pth",
+  },
+  "word_reverse": {
+    "generate": random_sentence,
+    "target": reverse_words,
+    "save_path": "./saved_models/word_reverse_model.pth",
+  },
+}
+
+def make_batch(task, batch_size, min_len=1, max_len=MAX_LEN):
+  generate, target = TASKS[task]["generate"], TASKS[task]["target"]
   srcs, tgts = [], []
   for _ in range(batch_size):
-    s = "".join(random.choices(CHARS, k=random.randint(min_len, max_len)))
+    s = generate(min_len, max_len)
     srcs.append([stoi[c] for c in s] + [EOS])
-    tgts.append([BOS] + [stoi[c] for c in reversed(s)] + [EOS])
+    tgts.append([BOS] + [stoi[c] for c in target(s)] + [EOS])
   src = torch.nn.utils.rnn.pad_sequence([torch.tensor(x) for x in srcs], batch_first=True, padding_value=PAD)
   tgt = torch.nn.utils.rnn.pad_sequence([torch.tensor(x) for x in tgts], batch_first=True, padding_value=PAD)
   return src, tgt[:, :-1], tgt[:, 1:]   # src, tgt_in, tgt_out
@@ -420,16 +481,25 @@ def parse_args():
     help = "Choose whether to run on CPU, CUDA, or MPS.",
   )
   parser.add_argument(
+    "--task",
+    choices = list(TASKS),
+    default = "reverse",
+    help = "reverse: reverse the whole string, word_reverse: reverse each word and keep the word order.",
+  )
+  parser.add_argument(
     "--save_path",
-    default = "./saved_models/reverse_model.pth",
-    help = "Path to save the trained model (or to load it with --infer_mode).",
+    default = None,
+    help = "Path to save the trained model (or to load it with --infer_mode). Default depends on --task.",
   )
   parser.add_argument(
     "--infer_mode",
     action = "store_true",
-    help = "Load the saved model and reverse strings typed in the terminal.",
+    help = "Load the saved model and transform strings typed in the terminal.",
   )
-  return parser.parse_args()
+  args = parser.parse_args()
+  if args.save_path is None:
+    args.save_path = TASKS[args.task]["save_path"]
+  return args
 
 def get_device(device_name):
   if device_name == "cuda" and not torch.cuda.is_available():
@@ -446,14 +516,15 @@ def build_model(device):
                      share_src_tgt_embed=True)
   return model.to(device)
 
-def reverse_string(model, s, device):
+def predict(model, s, device):
   src = torch.tensor([encode_string(s)], device=device)
   return decode_tokens(greedy_decode(model, src, max_length=len(s) + 5)[0].tolist())
 
 def train(args, device):
+  print(f"Task: {args.task}")
   # 고정된 검증셋 (학습 데이터는 매 step 새로 생성)
   random.seed(42)
-  val_batches = [make_batch(128) for _ in range(4)]
+  val_batches = [make_batch(args.task, 128) for _ in range(4)]
   random.seed()
 
   embedding_dim = EMBEDDING_DIM
@@ -470,7 +541,7 @@ def train(args, device):
 
   model.train()
   for step in range(1, args.steps + 1):
-    src, tgt_in, tgt_out = (t.to(device) for t in make_batch(args.batch_size))
+    src, tgt_in, tgt_out = (t.to(device) for t in make_batch(args.task, args.batch_size))
     src_mask = make_pad_mask(src, PAD)
     tgt_mask = make_pad_mask(tgt_in, PAD) & subsequent_mask(tgt_in.size(1)).to(device)
 
@@ -493,17 +564,22 @@ def train(args, device):
 
   # 예시 출력 (학습 범위 밖의 길이 포함)
   model.eval()
-  for s in ["hello", "Hello World", "Attention Is All You Need", CHARS[:26] + CHARS[27:]]:
-    pred = reverse_string(model, s, device)
-    mark = "O" if pred == s[::-1] else "X"
+  target = TASKS[args.task]["target"]
+  examples = ["hello", "Hello World", "Attention Is All You Need",
+              "The quick brown fox jumps over the lazy dog and keeps running"]
+  for s in examples:
+    pred = predict(model, s, device)
+    mark = "O" if pred == target(s) else "X"
     print(f"[{mark}] {s!r} -> {pred!r}")
 
 def infer(args, device):
   model = build_model(device)
   model.load_state_dict(torch.load(args.save_path, map_location=device))
   model.eval()
+  target = TASKS[args.task]["target"]
+  print(f"Task: {args.task}")
   print(f"Loaded model from {args.save_path}")
-  print("Type a string (a-z, A-Z, space) to reverse. Empty input or Ctrl+D to quit.")
+  print("Type a string (a-z, A-Z, space). Empty input or Ctrl+D to quit.")
 
   while True:
     try:
@@ -519,8 +595,8 @@ def infer(args, device):
       print(f"Unsupported characters: {''.join(invalid)!r} (only a-z, A-Z, space)")
       continue
 
-    pred = reverse_string(model, s, device)
-    mark = "O" if pred == s[::-1] else "X"
+    pred = predict(model, s, device)
+    mark = "O" if pred == target(s) else "X"
     note = f" (longer than training max {MAX_LEN})" if len(s) > MAX_LEN else ""
     # repr로 출력하여 앞뒤 공백이 보이도록 함
     print(f"[{mark}] {pred!r}{note}")
