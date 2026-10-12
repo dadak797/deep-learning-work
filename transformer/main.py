@@ -1,7 +1,10 @@
+import argparse
+import os
 import torch
 import torch.nn as nn
 import copy
 import math
+import random
 
 # Encoder
 # ├─ EncoderLayer 1
@@ -320,5 +323,215 @@ def make_model(src_vocab_size, tgt_vocab_size, Nx=6, embedding_dim=512, ff_dim=2
 
   return model
 
+PAD, BOS, EOS = 0, 1, 2
+CHARS = "abcdefghijklmnopqrstuvwxyz ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+stoi = {ch: i + 3 for i, ch in enumerate(CHARS)}   # 'a' → 3, ..., 'z' → 28, ' ' → 29, 'A' → 30, ..., 'Z' → 55
+itos = {i: ch for ch, i in stoi.items()}
+VOCAB_SIZE = len(CHARS) + 3                          # 56
+MAX_LEN = 50                                         # 학습 문자열 최대 길이
+
+def make_batch(batch_size, min_len=1, max_len=MAX_LEN):
+  srcs, tgts = [], []
+  for _ in range(batch_size):
+    s = "".join(random.choices(CHARS, k=random.randint(min_len, max_len)))
+    srcs.append([stoi[c] for c in s] + [EOS])
+    tgts.append([BOS] + [stoi[c] for c in reversed(s)] + [EOS])
+  src = torch.nn.utils.rnn.pad_sequence([torch.tensor(x) for x in srcs], batch_first=True, padding_value=PAD)
+  tgt = torch.nn.utils.rnn.pad_sequence([torch.tensor(x) for x in tgts], batch_first=True, padding_value=PAD)
+  return src, tgt[:, :-1], tgt[:, 1:]   # src, tgt_in, tgt_out
+
+def encode_string(s):
+  return [stoi[c] for c in s] + [EOS]
+
+def decode_tokens(tokens):
+  chars = []
+  for t in tokens:
+    if t == EOS:
+      break
+    chars.append(itos.get(t, "?"))
+  return "".join(chars)
+
+# Learning rate schedule (5.3절, 식 3)
+# lrate = d_model^-0.5 * min(step^-0.5, step * warmup_steps^-1.5)
+# warmup_steps 까지 선형 증가 후 step^-0.5 에 비례하여 감소
+def rate(step, embedding_dim, warmup_steps):
+  step = max(step, 1)  # step=0 일 때 0^-0.5 방지
+  return embedding_dim ** -0.5 * min(step ** -0.5, step * warmup_steps ** -1.5)
+
+# 한 번에 한 토큰씩 생성: 매 step마다 지금까지 생성한 토큰 전체를 디코더에 다시 넣음
+# src: (batch_size, src_length) -> (batch_size, <= max_length) 생성된 토큰 (BOS 제외)
+@torch.no_grad()
+def greedy_decode(model, src, max_length):
+  src_mask = make_pad_mask(src, PAD)
+  memory = model.encode(src, src_mask)  # 소스는 한 번만 인코딩
+
+  batch_size = src.size(0)
+  ys = torch.full((batch_size, 1), BOS, dtype=torch.long, device=src.device)
+  finished = torch.zeros(batch_size, dtype=torch.bool, device=src.device)
+  for _ in range(max_length):
+    tgt_mask = subsequent_mask(ys.size(1)).to(src.device)
+    out = model.decode(memory, src_mask, ys, tgt_mask)
+    logits = model.generator(out[:, -1])  # 마지막 위치만 사용: (batch_size, vocab_size)
+    next_token = logits.argmax(dim=-1)
+    next_token = next_token.masked_fill(finished, PAD)  # 이미 끝난 문장은 PAD로 채움
+    ys = torch.cat([ys, next_token.unsqueeze(1)], dim=1)
+    finished |= next_token == EOS
+    if finished.all():
+      break
+  return ys[:, 1:]
+
+# 문자열 단위 완전 일치 정확도
+def evaluate(model, val_batches, device):
+  model.eval()
+  correct, total = 0, 0
+  for src, _, tgt_out in val_batches:
+    src = src.to(device)
+    pred = greedy_decode(model, src, max_length=src.size(1) + 1)
+    for p, t in zip(pred.tolist(), tgt_out.tolist()):
+      correct += decode_tokens(p) == decode_tokens(t)
+      total += 1
+  model.train()
+  return correct / total
+
+def parse_args():
+  parser = argparse.ArgumentParser(description = "Transformer string reversal trainer")
+  parser.add_argument(
+    "--steps",
+    type = int,
+    default = 10000,
+    help = "Number of training steps.",
+  )
+  parser.add_argument(
+    "--batch_size",
+    type = int,
+    default = 128,
+    help = "Batch size for training.",
+  )
+  parser.add_argument(
+    "--warmup_steps",
+    type = int,
+    default = 400,
+    help = "Warmup steps for the learning rate schedule (paper: 4000).",
+  )
+  parser.add_argument(
+    "--device",
+    choices = ["cpu", "cuda", "mps"],
+    default = "mps",
+    help = "Choose whether to run on CPU, CUDA, or MPS.",
+  )
+  parser.add_argument(
+    "--save_path",
+    default = "./saved_models/reverse_model.pth",
+    help = "Path to save the trained model (or to load it with --infer_mode).",
+  )
+  parser.add_argument(
+    "--infer_mode",
+    action = "store_true",
+    help = "Load the saved model and reverse strings typed in the terminal.",
+  )
+  return parser.parse_args()
+
+def get_device(device_name):
+  if device_name == "cuda" and not torch.cuda.is_available():
+    raise RuntimeError("CUDA was requested, but no CUDA device is available.")
+  if device_name == "mps" and not torch.backends.mps.is_available():
+    raise RuntimeError("MPS was requested, but no MPS device is available.")
+  return torch.device(device_name)
+
+EMBEDDING_DIM = 128
+
+# 학습과 추론에서 같은 구조를 써야 state_dict를 불러올 수 있으므로 한 곳에서 생성
+def build_model(device):
+  model = make_model(VOCAB_SIZE, VOCAB_SIZE, Nx=2, embedding_dim=EMBEDDING_DIM, ff_dim=512, head_count=4,
+                     share_src_tgt_embed=True)
+  return model.to(device)
+
+def reverse_string(model, s, device):
+  src = torch.tensor([encode_string(s)], device=device)
+  return decode_tokens(greedy_decode(model, src, max_length=len(s) + 5)[0].tolist())
+
+def train(args, device):
+  # 고정된 검증셋 (학습 데이터는 매 step 새로 생성)
+  random.seed(42)
+  val_batches = [make_batch(128) for _ in range(4)]
+  random.seed()
+
+  embedding_dim = EMBEDDING_DIM
+  model = build_model(device)
+  print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
+
+  # Optimizer (5.3절): base lr=1.0 에 LambdaLR 이 rate()를 곱하므로 실제 lr = rate(step)
+  optimizer = torch.optim.Adam(model.parameters(), lr=1.0, betas=(0.9, 0.98), eps=1e-9)
+  scheduler = torch.optim.lr_scheduler.LambdaLR(
+    optimizer, lambda step: rate(step, embedding_dim, args.warmup_steps)
+  )
+  # Label Smoothing (5.4절), PAD 위치는 loss에서 제외
+  criterion = nn.CrossEntropyLoss(label_smoothing=0.1, ignore_index=PAD)
+
+  model.train()
+  for step in range(1, args.steps + 1):
+    src, tgt_in, tgt_out = (t.to(device) for t in make_batch(args.batch_size))
+    src_mask = make_pad_mask(src, PAD)
+    tgt_mask = make_pad_mask(tgt_in, PAD) & subsequent_mask(tgt_in.size(1)).to(device)
+
+    logits = model(src, tgt_in, src_mask, tgt_mask)  # (batch_size, tgt_length, vocab_size)
+    loss = criterion(logits.reshape(-1, VOCAB_SIZE), tgt_out.reshape(-1))
+
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+    scheduler.step()
+
+    if step % 100 == 0:
+      print(f"step {step:5d} | loss {loss.item():.4f} | lr {scheduler.get_last_lr()[0]:.6f}")
+    if step % 500 == 0 or step == args.steps:
+      print(f"step {step:5d} | val exact match {evaluate(model, val_batches, device):.2%}")
+
+  os.makedirs(os.path.dirname(args.save_path) or ".", exist_ok = True)
+  torch.save(model.state_dict(), args.save_path)
+  print(f"Saved model to {args.save_path}")
+
+  # 예시 출력 (학습 범위 밖의 길이 포함)
+  model.eval()
+  for s in ["hello", "Hello World", "Attention Is All You Need", CHARS[:26] + CHARS[27:]]:
+    pred = reverse_string(model, s, device)
+    mark = "O" if pred == s[::-1] else "X"
+    print(f"[{mark}] {s!r} -> {pred!r}")
+
+def infer(args, device):
+  model = build_model(device)
+  model.load_state_dict(torch.load(args.save_path, map_location=device))
+  model.eval()
+  print(f"Loaded model from {args.save_path}")
+  print("Type a string (a-z, A-Z, space) to reverse. Empty input or Ctrl+D to quit.")
+
+  while True:
+    try:
+      # 공백도 입력 문자이므로 strip 하지 않음 (input()은 줄바꿈만 제거)
+      s = input("> ")
+    except (EOFError, KeyboardInterrupt):
+      print()
+      break
+    if not s:
+      break
+    invalid = sorted(set(c for c in s if c not in stoi))
+    if invalid:
+      print(f"Unsupported characters: {''.join(invalid)!r} (only a-z, A-Z, space)")
+      continue
+
+    pred = reverse_string(model, s, device)
+    mark = "O" if pred == s[::-1] else "X"
+    note = f" (longer than training max {MAX_LEN})" if len(s) > MAX_LEN else ""
+    # repr로 출력하여 앞뒤 공백이 보이도록 함
+    print(f"[{mark}] {pred!r}{note}")
+
+def main():
+  args = parse_args()
+  device = get_device(args.device)
+  if args.infer_mode:
+    infer(args, device)
+  else:
+    train(args, device)
+
 if __name__ == "__main__":
-  pass  
+  main()
