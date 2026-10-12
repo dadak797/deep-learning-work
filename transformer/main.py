@@ -12,6 +12,11 @@ import math
 # ├─ ...
 # └─ EncoderLayer 6
 #    └─ ...
+#
+# DecoderLayer
+# ├─ Masked SelfAttention        → Dropout → Add → LayerNorm
+# ├─ Encoder-Decoder Attention   → Dropout → Add → LayerNorm
+# └─ FeedForward                 → Dropout → Add → LayerNorm
 
 def scaled_dot_product_attention(query, key, value, mask=None):
   # query, key, value: (batch_size, head_count, seq_length, key_dim or value_dim)
@@ -125,6 +130,44 @@ class EncoderLayer(nn.Module):
     x = self.norm2(x)                            # LayerNorm2
     return x
 
+class DecoderLayer(nn.Module):
+  def __init__(self, embedding_dim, self_attn, src_attn, feed_forward, dropout=0.1, epsilon=1e-6):
+    super().__init__()
+    # 같은 인스턴스를 넘기면 두 Attention이 가중치를 공유하게 되므로 막음
+    assert self_attn is not src_attn, "self_attn and src_attn must be different instances"
+
+    # Masked Self-Attention SubLayer
+    self.self_attn = self_attn
+    self.dropout1 = nn.Dropout(dropout)
+    self.norm1 = nn.LayerNorm(embedding_dim, eps=epsilon)
+
+    # Encoder-Decoder Attention SubLayer
+    self.src_attn = src_attn
+    self.dropout2 = nn.Dropout(dropout)
+    self.norm2 = nn.LayerNorm(embedding_dim, eps=epsilon)
+
+    # Feed-Forward SubLayer
+    self.feed_forward = feed_forward
+    self.dropout3 = nn.Dropout(dropout)
+    self.norm3 = nn.LayerNorm(embedding_dim, eps=epsilon)
+
+  # x: (batch_size, tgt_length, embedding_dim) 디코더 입력
+  # memory: (batch_size, src_length, embedding_dim) 인코더 출력
+  # src_mask: (batch_size, 1, src_length) padding mask
+  # tgt_mask: (batch_size, tgt_length, tgt_length) padding mask & subsequent mask
+  def forward(self, x, memory, src_mask, tgt_mask):
+    attn_output = self.self_attn(x, x, x, tgt_mask)              # Masked Self-Attention
+    x = x + self.dropout1(attn_output)                           # Add
+    x = self.norm1(x)                                            # LayerNorm1
+    # Query: 디코더, Key/Value: 인코더 출력
+    attn_output = self.src_attn(x, memory, memory, src_mask)     # Encoder-Decoder Attention
+    x = x + self.dropout2(attn_output)                           # Add
+    x = self.norm2(x)                                            # LayerNorm2
+    ff_output = self.feed_forward(x)                             # Feed-Forward
+    x = x + self.dropout3(ff_output)                             # Add
+    x = self.norm3(x)                                            # LayerNorm3
+    return x
+
 class PositionalEncoding(nn.Module):
   def __init__(self, embedding_dim, dropout=0.1, max_length=5000):
     super().__init__()
@@ -166,6 +209,18 @@ class Embeddings(nn.Module):
 def make_pad_mask(src, pad_idx):
   return (src != pad_idx).unsqueeze(1)
 
+# Look-ahead mask: 위치 i는 j <= i 인 위치만 볼 수 있음 (1 = attend, 0 = masked)
+# size=4 일 때:
+#   [[1, 0, 0, 0],
+#    [1, 1, 0, 0],
+#    [1, 1, 1, 0],
+#    [1, 1, 1, 1]]
+# 반환: (1, size, size) → batch 차원으로 broadcast 되어 padding mask와 & 로 결합 가능
+#   tgt_mask = make_pad_mask(tgt, pad_idx) & subsequent_mask(tgt.size(1)).to(tgt.device)
+#   (batch_size, 1, tgt_length) & (1, tgt_length, tgt_length) -> (batch_size, tgt_length, tgt_length)
+def subsequent_mask(size):
+  return torch.tril(torch.ones(1, size, size, dtype=torch.bool))
+
 class Encoder(nn.Module):
   def __init__(self, layer, Nx):
     super().__init__()
@@ -174,6 +229,18 @@ class Encoder(nn.Module):
   def forward(self, x, mask):
     for layer in self.layers:
       x = layer(x, mask)
+    return x
+
+class Decoder(nn.Module):
+  def __init__(self, layer, Nx):
+    super().__init__()
+    self.layers = nn.ModuleList([copy.deepcopy(layer) for _ in range(Nx)])
+
+  # x: (batch_size, tgt_length, embedding_dim)
+  # memory: (batch_size, src_length, embedding_dim) 인코더 출력 (모든 층이 같은 memory를 참조함)
+  def forward(self, x, memory, src_mask, tgt_mask):
+    for layer in self.layers:
+      x = layer(x, memory, src_mask, tgt_mask)
     return x
 
 if __name__ == "__main__":
