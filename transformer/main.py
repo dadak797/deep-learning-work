@@ -21,16 +21,64 @@ import random
 # ├─ Encoder-Decoder Attention   → Dropout → Add → LayerNorm
 # └─ FeedForward                 → Dropout → Add → LayerNorm
 
+# 3.4 Embeddings and Softmax
+class Embeddings(nn.Module):
+  def __init__(self, vocab_size, embedding_dim):
+    super().__init__()
+    self.embedding = nn.Embedding(vocab_size, embedding_dim)
+    self.embedding_dim = embedding_dim
+
+  # Input
+  # - 토큰 인덱스가 값으로 들어있음
+  # - shape: (batch_size, seq_length)
+  # Output
+  # - 토큰 인덱스를 넣으면 해당 행의 임베딩 벡터가 반환됨
+  # - shape: (batch_size, seq_length, embedding_dim)
+  def forward(self, x):
+    return self.embedding(x) * math.sqrt(self.embedding_dim)
+
+# 3.5 Positional Encoding
+class PositionalEncoding(nn.Module):
+  def __init__(self, embedding_dim, dropout=0.1, max_length=5000):
+    super().__init__()
+    self.dropout = nn.Dropout(dropout)
+
+    # PE: (max_length, embedding_dim)
+    pe = torch.zeros(max_length, embedding_dim)
+    # position: (max_length, 1) → pos
+    position = torch.arange(0, max_length, dtype=torch.float).unsqueeze(1)
+    # two_i: (embedding_dim / 2,) → 2i = [0, 2, 4, ..., embedding_dim - 2]
+    two_i = torch.arange(0, embedding_dim, 2, dtype=torch.float)
+    # denominator: 10000^(2i / embedding_dim)
+    denominator = torch.pow(10000.0, two_i / embedding_dim)
+
+    # broadcast: (max_length, 1) / (embedding_dim / 2,) -> (max_length, embedding_dim / 2)
+    pe[:, 0::2] = torch.sin(position / denominator)  # PE(pos, 2i)   = sin(pos / 10000^(2i/d))
+    pe[:, 1::2] = torch.cos(position / denominator)  # PE(pos, 2i+1) = cos(pos / 10000^(2i/d))
+
+    # (1, max_length, embedding_dim): batch 차원으로 broadcast 되도록 함
+    # register_buffer: 학습 파라미터는 아니지만 state_dict에 저장되고 .to(device) 시 함께 이동함
+    self.register_buffer("pe", pe.unsqueeze(0))
+
+  # x: (batch_size, seq_length, embedding_dim)
+  def forward(self, x):
+    x = x + self.pe[:, :x.size(1)]
+    return self.dropout(x)
+
+# 3.2.1 Scaled Dot-Product Attention
 def scaled_dot_product_attention(query, key, value, mask=None):
-  # query, key, value: (batch_size, head_count, seq_length, key_dim or value_dim)
+  # query: (batch_size, head_count, query_length, key_dim)
+  # key:   (batch_size, head_count, key_length, key_dim)
+  # value: (batch_size, head_count, key_length, value_dim)
   key_dim = query.size(-1)
-  # score: (batch_size, head_count, seq_length, seq_length)
+  # scores, attn: (batch_size, head_count, query_length, key_length)
   scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(key_dim)
   if mask is not None:
     scores = scores.masked_fill(mask == 0, torch.finfo(scores.dtype).min)
   attn = torch.softmax(scores, dim=-1)
   return torch.matmul(attn, value), attn
 
+# 3.2.2 Multi-Head Attention
 class MultiHeadAttention(nn.Module):
   def __init__(self, head_count, embedding_dim):
     super().__init__()
@@ -94,6 +142,7 @@ class MultiHeadAttention(nn.Module):
     
     return self.output_mat(x)
 
+# 3.3 Position-wise Feed-Forward Networks
 class PositionwiseFeedForward(nn.Module):
   def __init__(self, embedding_dim, ff_dim=2048):
     super().__init__()
@@ -106,6 +155,7 @@ class PositionwiseFeedForward(nn.Module):
     x = torch.relu(self.linear1(x))  # (batch_size, seq_length, ff_dim)
     return self.linear2(x)           # (batch_size, seq_length, embedding_dim)
 
+# 3.1 Encoder and Decoder Stacks
 class EncoderLayer(nn.Module):
   def __init__(self, embedding_dim, self_attn, feed_forward, dropout=0.1, epsilon=1e-6):
     super().__init__()
@@ -133,6 +183,7 @@ class EncoderLayer(nn.Module):
     x = self.norm2(x)                            # LayerNorm2
     return x
 
+# 3.1 Encoder and Decoder Stacks
 class DecoderLayer(nn.Module):
   def __init__(self, embedding_dim, self_attn, src_attn, feed_forward, dropout=0.1, epsilon=1e-6):
     super().__init__()
@@ -170,43 +221,6 @@ class DecoderLayer(nn.Module):
     x = x + self.dropout3(ff_output)                             # Add
     x = self.norm3(x)                                            # LayerNorm3
     return x
-
-class PositionalEncoding(nn.Module):
-  def __init__(self, embedding_dim, dropout=0.1, max_length=5000):
-    super().__init__()
-    self.dropout = nn.Dropout(dropout)
-
-    # pe: (max_length, embedding_dim)
-    pe = torch.zeros(max_length, embedding_dim)
-    # position: (max_length, 1) → pos
-    position = torch.arange(0, max_length, dtype=torch.float).unsqueeze(1)
-    # two_i: (embedding_dim / 2,) → 2i = [0, 2, 4, ..., embedding_dim - 2]
-    two_i = torch.arange(0, embedding_dim, 2, dtype=torch.float)
-    # denominator: 10000^(2i / embedding_dim)
-    denominator = torch.pow(10000.0, two_i / embedding_dim)
-
-    # broadcast: (max_length, 1) / (embedding_dim / 2,) -> (max_length, embedding_dim / 2)
-    pe[:, 0::2] = torch.sin(position / denominator)  # PE(pos, 2i)   = sin(pos / 10000^(2i/d))
-    pe[:, 1::2] = torch.cos(position / denominator)  # PE(pos, 2i+1) = cos(pos / 10000^(2i/d))
-
-    # (1, max_length, embedding_dim): batch 차원으로 broadcast 되도록 함
-    # register_buffer: 학습 파라미터는 아니지만 state_dict에 저장되고 .to(device) 시 함께 이동함
-    self.register_buffer("pe", pe.unsqueeze(0))
-
-  # x: (batch_size, seq_length, embedding_dim)
-  def forward(self, x):
-    x = x + self.pe[:, :x.size(1)]
-    return self.dropout(x)
-
-class Embeddings(nn.Module):
-  def __init__(self, vocab_size, embedding_dim):
-    super().__init__()
-    self.embedding = nn.Embedding(vocab_size, embedding_dim)
-    self.embedding_dim = embedding_dim
-
-  # x: (batch_size, seq_length) 토큰 인덱스
-  def forward(self, x):
-    return self.embedding(x) * math.sqrt(self.embedding_dim)
 
 # src: (batch_size, src_length) → (batch_size, 1, src_length)
 def make_pad_mask(src, pad_idx):
