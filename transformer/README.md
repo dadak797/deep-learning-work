@@ -82,6 +82,40 @@ python main.py --task word_reverse --steps 10000 --batch_size 128 --device mps
 - `--device`: cpu, cuda, mps(for Mac) (default: mps)
 - `--save_path`: Path to save the trained weights (default: depends on `--task`, see the table above; the folder is created if missing)
 
+# Plots
+
+`analyze.py` saves plots from a trained model and its training log, without changing `main.py`.
+It needs `matplotlib` (`pip install matplotlib`).
+
+```
+mkdir -p logs/reverse
+python -u main.py --task reverse | tee logs/reverse/train.log   # train and keep the printed log
+python analyze.py --task reverse                                # save plots to logs/reverse/
+```
+
+- `-u` turns off output buffering so the log appears in the terminal while training
+- Without `train.log`, plots 01 and 03 are skipped and the rest are still saved
+- Options: `--task`, `--save_path`, `--log_dir` (default: `./logs/<task>`), `--warmup_steps` (default: 400), `--device`
+
+| File | Content | Source |
+|---|---|---|
+| `01_loss.png` | Training loss every 100 steps and the label smoothing floor (0.715) | log |
+| `02_learning_rate.png` | `rate()` schedule with the values printed in the log | `rate()`, log |
+| `03_val_exact_match.png` | Validation exact match every 500 steps | log |
+| `04_accuracy_by_length.png` | Accuracy by input length 1–65, including lengths longer than training | model |
+| `05_error_by_position.png` | Error rate by input length and output position | model |
+| `06_confusion_matrix.png` | Which characters are confused with which (errors only) | model |
+| `07_confidence.png` | Max softmax probability of correct and wrong predictions | model |
+| `08_attention_encoder_self.png` | Encoder self-attention of every layer and head | model |
+| `09_attention_decoder_self.png` | Decoder masked self-attention | model |
+| `10_attention_cross.png` | Encoder-decoder attention (anti-diagonal for `reverse`) | model |
+| `11_positional_encoding.png` | Positional encoding values and the similarity between positions | model |
+| `12_embedding_pca.png` | Token embeddings projected to 2D with PCA | model |
+| `13_embedding_similarity.png` | Cosine similarity between token embeddings (mean-centered) | model |
+
+- Attention plots use the string `Attention Is All You Need` (`MultiHeadAttention` keeps the last attention weights in `self.attn`)
+- Plots 06 and 07 use the same validation set as training (seed 42)
+
 # Inference
 
 - Loads the weights for `--task` (or from `--save_path`) and transforms strings typed in the terminal
